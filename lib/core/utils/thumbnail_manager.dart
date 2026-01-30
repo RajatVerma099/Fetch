@@ -27,6 +27,9 @@ class ThumbnailManager {
   factory ThumbnailManager() => _instance;
 
   late final CacheManager _cache;
+  
+  // In-memory LRU cache for instant access during scrolling
+  final _memoryCache = _LruCache<String, Uint8List>(capacity: 200);
 
   // Limit concurrency to avoid spawning too many isolates / native calls
   final int _maxConcurrent = 4;
@@ -40,11 +43,21 @@ class ThumbnailManager {
   Future<Uint8List?> getThumbnail(String filePath, {required bool isVideo, int width = 300}) async {
     final key = await _cacheKey(filePath, width);
 
+    // 1. FAST PATH: Check in-memory LRU cache
+    final memCached = _memoryCache.get(key);
+    if (memCached != null) {
+      print('[CACHE] [MEM_HIT] $filePath');
+      return memCached;
+    }
+
     try {
+      // 2. DISK PATH: Check disk cache
       final cached = await _cache.getFileFromCache(key);
       if (cached != null && await cached.file.exists()) {
-        print('[ThumbnailManager] Cache hit for $filePath');
-        return await cached.file.readAsBytes();
+        print('[CACHE] [DISK_HIT] $filePath');
+        final bytes = await cached.file.readAsBytes();
+        _memoryCache.put(key, bytes);
+        return bytes;
       }
     } catch (e) {
       // ignore cache read errors
@@ -54,7 +67,8 @@ class ThumbnailManager {
 
     _queue.add(() async {
       try {
-        print('[ThumbnailManager] Generating thumbnail for $filePath (isVideo=$isVideo)');
+        // 3. SLOW PATH: Generate thumbnail
+        print('[CACHE] [MISS/DECODE] $filePath (isVideo=$isVideo)');
         Uint8List? bytes;
         if (isVideo) {
           bytes = await VideoThumbnail.thumbnailData(
@@ -69,6 +83,7 @@ class ThumbnailManager {
         }
 
         if (bytes != null && bytes.isNotEmpty) {
+          _memoryCache.put(key, bytes);
           try {
             await _cache.putFile(key, bytes, fileExtension: 'jpg');
           } catch (e) {
@@ -77,7 +92,7 @@ class ThumbnailManager {
         }
 
         completer.complete(bytes);
-        print('[ThumbnailManager] Thumbnail ready for $filePath');
+        print('[CACHE] [READY] $filePath');
       } catch (e, st) {
         print('[ThumbnailManager] Thumbnail generation failed for $filePath: $e');
         print(st);
@@ -109,6 +124,34 @@ class ThumbnailManager {
       return '${path}_w$width';
     }
   }
+}
+
+/// Simple LRU Cache implementation using LinkedHashMap
+class _LruCache<K, V> {
+  final int capacity;
+  final LinkedHashMap<K, V> _map = LinkedHashMap<K, V>();
+
+  _LruCache({required this.capacity});
+
+  V? get(K key) {
+    if (!_map.containsKey(key)) return null;
+    final value = _map.remove(key);
+    if (value != null) {
+      _map[key] = value;
+    }
+    return value;
+  }
+
+  void put(K key, V value) {
+    if (_map.containsKey(key)) {
+      _map.remove(key);
+    } else if (_map.length >= capacity) {
+      _map.remove(_map.keys.first);
+    }
+    _map[key] = value;
+  }
+
+  void clear() => _map.clear();
 }
 
 Future<Uint8List> _decodeAndResize(Map args) async {

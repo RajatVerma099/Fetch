@@ -308,6 +308,7 @@ class _ResultsScreenState extends State<ResultsScreen>
           crossAxisSpacing: 8,
           mainAxisSpacing: 8,
         ),
+        cacheExtent: 500, // Preload small buffer (roughly 2 rows)
         itemCount: files.length,
         itemBuilder: (ctx, idx) {
           print('[ResultsScreen] [GRID_ITEM] Rendering item $idx of $category');
