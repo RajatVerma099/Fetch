@@ -38,21 +38,28 @@ class _ScanScreenState extends State<ScanScreen> {
     
     // Request permissions and start scan when screen loads
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final hasPermission = await PermissionUtils.hasStoragePermissions();
+      bool hasPermission = await PermissionUtils.hasStoragePermissions();
       
       if (!hasPermission && mounted) {
-        final granted = await PermissionUtils.requestStoragePermissions(context);
-        if (!granted && mounted) {
-          // Permissions denied - show error and go back
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Storage permissions are required to scan your device'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          Navigator.of(context).pop();
-          return;
-        }
+        hasPermission = await PermissionUtils.requestStoragePermissions(context);
+      }
+
+      // On Android 11+, we strongly recommend All Files Access for recovery
+      if (hasPermission && mounted) {
+        // This will check if already granted, or show a dialog explaining why it's needed for recovery
+        await PermissionUtils.requestAllFilesAccess(context);
+      }
+      
+      if (!hasPermission && mounted) {
+        // Permissions denied - show error and go back
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Storage permissions are required to scan your device'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        Navigator.of(context).pop();
+        return;
       }
       
       // Permissions granted, start the scan

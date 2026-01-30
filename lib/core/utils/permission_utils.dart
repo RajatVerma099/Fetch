@@ -49,27 +49,54 @@ class PermissionUtils {
   /// Check if we have necessary permissions
   static Future<bool> hasStoragePermissions() async {
     if (Platform.isAndroid) {
-      // Check granular permissions first (Android 13+)
-      final photos = await Permission.photos.isGranted;
-      final videos = await Permission.videos.isGranted;
-
-      if (photos && videos) {
+      if (await Permission.manageExternalStorage.isGranted) {
+        return true;
+      }
+      
+      // Fallback for Android 13+ media permissions
+      if (await Permission.photos.isGranted && await Permission.videos.isGranted) {
         return true;
       }
 
-      // Check legacy permission
-      final storage = await Permission.storage.isGranted;
-      if (storage) {
-        return true;
-      }
-
-      // Check manage external storage
-      final manageStorage = await Permission.manageExternalStorage.isGranted;
-      if (manageStorage) {
-        return true;
-      }
+      // Legacy permission
+      return await Permission.storage.isGranted;
     }
+    return true;
+  }
 
+  /// Explicitly request All Files Access (MANAGE_EXTERNAL_STORAGE)
+  /// This is required for recovery and accessing restricted areas on Android 11+
+  static Future<bool> requestAllFilesAccess(BuildContext context) async {
+    if (!Platform.isAndroid) return true;
+
+    final status = await Permission.manageExternalStorage.request();
+    if (status.isGranted) return true;
+
+    if (context.mounted) {
+      return await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('All Files Access Required'),
+          content: const Text(
+            'To recover files and scan protected system folders, Fetch needs "All Files Access" permission.\n\n'
+            'Please find "Fetch" in the next screen and toggle it ON.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Not Now'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.pop(ctx, true);
+                await openAppSettings(); // Or use ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION via MethodChannel if needed
+              },
+              child: const Text('Open Settings'),
+            ),
+          ],
+        ),
+      ) ?? false;
+    }
     return false;
   }
 

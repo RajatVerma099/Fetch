@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'dart:async';
 import '../../../core/database/database.dart';
+import '../../../core/utils/thumbnail_manager.dart';
+import '../../../core/utils/preview_manager.dart';
+import '../../../core/widgets/preview_overlay.dart';
+import 'dart:typed_data';
 
 /// Results screen showing recovered files in categorized tabs
 class ResultsScreen extends StatefulWidget {
@@ -13,6 +18,7 @@ class ResultsScreen extends StatefulWidget {
 
 class _ResultsScreenState extends State<ResultsScreen>
     with SingleTickerProviderStateMixin {
+  static const _scannerChannel = MethodChannel('com.fetch.app/scanner');
   late TabController _tabController;
   final _images = <ScannedFile>[];
   final _videos = <ScannedFile>[];
@@ -24,6 +30,11 @@ class _ResultsScreenState extends State<ResultsScreen>
   
   // CRITICAL: Store subscription to prevent garbage collection
   StreamSubscription<List<ScannedFile>>? _fileStreamSubscription;
+  
+  // Preview overlay state
+  ScannedFile? _previewFile;
+  bool _isPreviewVisible = false;
+  Timer? _previewTimer;
 
   @override
   void initState() {
@@ -163,8 +174,28 @@ class _ResultsScreenState extends State<ResultsScreen>
     // CRITICAL: Cancel subscription to prevent memory leak
     print('[ResultsScreen] [DISPOSE] Cancelling file stream subscription');
     _fileStreamSubscription?.cancel();
+    _previewTimer?.cancel();
     _tabController.dispose();
+    _closePreview();
     super.dispose();
+  }
+
+  void _showPreview(ScannedFile file) {
+    print('[ResultsScreen] [PREVIEW] Long-press detected for ${file.fileName}');
+    setState(() {
+      _previewFile = file;
+      _isPreviewVisible = true;
+    });
+    PreviewManager().startPreview();
+  }
+
+  void _closePreview() {
+    print('[ResultsScreen] [PREVIEW] Closing preview');
+    _previewTimer?.cancel();
+    _previewTimer = null;
+    setState(() => _isPreviewVisible = false);
+    _previewFile = null;
+    PreviewManager().releasePreview();
   }
 
   @override
@@ -195,7 +226,17 @@ class _ResultsScreenState extends State<ResultsScreen>
             ],
           ),
         ),
-        body: _buildBody(context),
+        body: Stack(
+          children: [
+            _buildBody(context),
+            // Preview overlay (shown when long-press active)
+            if (_isPreviewVisible && _previewFile != null)
+              PreviewOverlay(
+                file: _previewFile!,
+                onDismiss: _closePreview,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -269,6 +310,7 @@ class _ResultsScreenState extends State<ResultsScreen>
           crossAxisSpacing: 8,
           mainAxisSpacing: 8,
         ),
+        cacheExtent: 500, // Preload small buffer (roughly 2 rows)
         itemCount: files.length,
         itemBuilder: (ctx, idx) {
           print('[ResultsScreen] [GRID_ITEM] Rendering item $idx of $category');
@@ -290,54 +332,112 @@ class _ResultsScreenState extends State<ResultsScreen>
   }
 
   Widget _buildFileGridItem(ScannedFile file) {
-    return InkWell(
-      onTap: () => _showFileDetails(file),
-      borderRadius: BorderRadius.circular(8),
-      child: ClipRRect(
+    final isVideo = file.fileType == FileType.video;
+    print('[ResultsScreen] [GRID_ITEM] Building tile for ${file.fileName} (isVideo=$isVideo)');
+
+    return GestureDetector(
+      onLongPressStart: (_) {
+        print('[ResultsScreen] [PREVIEW] Long-press detected, starting 500ms timer (total 1000ms)');
+        _previewTimer?.cancel();
+        _previewTimer = Timer(const Duration(milliseconds: 500), () {
+          if (mounted) {
+            _showPreview(file);
+          }
+        });
+      },
+      onLongPressEnd: (_) => _closePreview(),
+      onLongPressCancel: () => _closePreview(),
+      child: InkWell(
+        onTap: () => _showFileDetails(file),
         borderRadius: BorderRadius.circular(8),
-        child: Container(
-          color: Colors.grey[300],
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Center(
-                child: Icon(
-                  _getCategoryIconFromFileType(file.fileType),
-                  color: Colors.white70,
-                  size: 40,
-                ),
-              ),
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: Container(
-                  color: Colors.black.withOpacity(0.7),
-                  padding: const EdgeInsets.all(4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        file.fileName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                        ),
-                      ),
-                      Text(
-                        _formatFileSize(file.fileSize),
-                        style: const TextStyle(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            color: Colors.grey[300],
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // Thumbnail (lazy, async, cached)
+                FutureBuilder<Uint8List?>(
+                  future: ThumbnailManager().getThumbnail(file.path, isVideo: isVideo, width: 300),
+                  builder: (ctx, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      print('[Thumbnail] requested for ${file.fileName}');
+                    }
+
+                    if (snapshot.hasData && snapshot.data != null && snapshot.data!.isNotEmpty) {
+                      print('[Thumbnail] loaded for ${file.fileName}');
+                      return Image.memory(
+                        snapshot.data!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: double.infinity,
+                      );
+                    }
+
+                    if (snapshot.hasError) {
+                      print('[Thumbnail] failed for ${file.fileName}: ${snapshot.error}');
+                    }
+
+                    // Placeholder (shown immediately)
+                    return Container(
+                      color: Colors.grey[300],
+                      child: Center(
+                        child: Icon(
+                          _getCategoryIconFromFileType(file.fileType),
                           color: Colors.white70,
-                          fontSize: 8,
+                          size: 40,
                         ),
                       ),
-                    ],
+                    );
+                  },
+                ),
+
+                // Video overlay icon
+                if (isVideo)
+                  const Positioned(
+                    top: 6,
+                    right: 6,
+                    child: Icon(
+                      Icons.videocam,
+                      color: Colors.white70,
+                      size: 20,
+                    ),
+                  ),
+
+                // Bottom info bar (name + size)
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    color: Colors.black.withOpacity(0.7),
+                    padding: const EdgeInsets.all(4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          file.fileName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                          ),
+                        ),
+                        Text(
+                          _formatFileSize(file.fileSize),
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 8,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -455,13 +555,73 @@ class _ResultsScreenState extends State<ResultsScreen>
     );
   }
 
-  void _recoverFile(ScannedFile file) {
+  Future<void> _recoverFile(ScannedFile file) async {
+    print('[RECOVERY] [START] Requesting recovery for ${file.fileName}');
+    
+    // Show "Recovering..." snackbar or dialog if needed
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('File ${file.fileName} recovered successfully!'),
-        backgroundColor: Colors.green,
+        content: Text('Recovering ${file.fileName}...'),
+        duration: const Duration(seconds: 1),
       ),
     );
+
+    try {
+      final result = await _scannerChannel.invokeMethod('recoverFile', {
+        'path': file.path,
+        'name': file.fileName,
+        'category': _getCategoryNameFromType(file.fileType),
+      });
+
+      if (result != null) {
+        print('[RECOVERY] [SUCCESS] File recovered to $result');
+        if (mounted) {
+          ScaffoldMessenger.of(context).clearSnackBars();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Recovered to Fetch folder!'),
+              backgroundColor: Colors.green,
+              action: SnackBarAction(
+                label: 'DISMISS',
+                textColor: Colors.white,
+                onPressed: () {},
+              ),
+            ),
+          );
+        }
+      }
+    } on PlatformException catch (e) {
+      print('[RECOVERY] [ERROR] PlatformException: ${e.code}, ${e.message}');
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.message ?? e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('[RECOVERY] [ERROR] Unknown error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Unknown error: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  String _getCategoryNameFromType(FileType type) {
+    return type.toString().split('.').last.toLowerCase();
   }
 
   String _formatFileSize(int bytes) {

@@ -1,6 +1,7 @@
 package com.fetch.fetch
 
 import android.content.Context
+import android.os.Build
 import android.os.Environment
 import android.os.StatFs
 import android.util.Log
@@ -9,8 +10,11 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.EventChannel
 import kotlinx.coroutines.*
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import android.media.MediaScannerConnection
 import kotlin.math.min
 
 /**
@@ -111,11 +115,29 @@ class ScannerPlugin(
             "generateThumbnail" -> {
                 val path = call.argument<String>("path") ?: ""
                 val mimeType = call.argument<String>("mimeType") ?: "application/octet-stream"
+                val size = call.argument<Int>("size") ?: 256
                 scope.launch {
-                    val thumbnail = ThumbnailGenerator.generate(context, path, mimeType)
+                    val thumbnail = ThumbnailGenerator.generate(context, path, mimeType, size)
                     withContext(Dispatchers.Main) {
                         result.success(thumbnail)
                     }
+                }
+            }
+            "checkAllFilesPermission" -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    result.success(Environment.isExternalStorageManager())
+                } else {
+                    result.success(true) // Not needed for older versions
+                }
+            }
+            "requestAllFilesPermission" -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val intent = android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                    intent.data = android.net.Uri.parse("package:" + context.packageName)
+                    context.startActivity(intent)
+                    result.success(true)
+                } else {
+                    result.success(true)
                 }
             }
             "extractMetadata" -> {
@@ -127,7 +149,114 @@ class ScannerPlugin(
                     }
                 }
             }
+            "recoverFile" -> {
+                val path = call.argument<String>("path") ?: ""
+                val name = call.argument<String>("name") ?: "recovered_file"
+                val category = call.argument<String>("category") ?: "other"
+                scope.launch {
+                    try {
+                        val recoveredPath = recoverFile(path, name, category)
+                        withContext(Dispatchers.Main) {
+                            if (recoveredPath != null) {
+                                result.success(recoveredPath)
+                            } else {
+                                result.error("RECOVERY_FAILED", "Could not recover file (null result). Check if 'All Files Access' permission is granted.", null)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            val errorMessage = when {
+                                e is java.io.FileNotFoundException -> "File not found or access denied: ${e.message}"
+                                e.message?.contains("Permission denied") == true -> "Permission denied! Please grant 'All Files Access' in settings."
+                                else -> e.message ?: "Unknown error"
+                            }
+                            result.error("RECOVERY_FAILED", errorMessage, e.stackTraceToString())
+                        }
+                    }
+                }
+            }
             else -> result.notImplemented()
+        }
+    }
+
+    private suspend fun recoverFile(sourcePath: String, fileName: String, category: String): String? = withContext(Dispatchers.IO) {
+        try {
+            Log.d(TAG, "[RECOVERY] Starting recovery for: $sourcePath (category: $category)")
+            val sourceFile = File(sourcePath)
+            if (!sourceFile.exists()) {
+                throw java.io.FileNotFoundException("Source file does not exist at: $sourcePath")
+            }
+
+            // Determine best public folder based on category
+            val typeDir = when (category.lowercase()) {
+                "image" -> Environment.DIRECTORY_PICTURES
+                "video" -> Environment.DIRECTORY_MOVIES
+                "audio" -> Environment.DIRECTORY_MUSIC
+                else -> Environment.DIRECTORY_DOCUMENTS
+            }
+            
+            // Create Fetch folder - log every step
+            val publicDir = Environment.getExternalStoragePublicDirectory(typeDir)
+            Log.d(TAG, "[RECOVERY] Step 1: Target base dir is: ${publicDir.absolutePath}")
+            
+            val fetchFolder = File(publicDir, "Fetch")
+            if (!fetchFolder.exists()) {
+                val created = fetchFolder.mkdirs()
+                Log.d(TAG, "[RECOVERY] Step 2: Fetch folder missing, recreating: $created at ${fetchFolder.absolutePath}")
+                if (!created && !fetchFolder.exists()) {
+                    throw Exception("Could not create 'Fetch' folder at ${fetchFolder.absolutePath}. Please check if the app has permission to write to this location.")
+                }
+            } else if (!fetchFolder.isDirectory) {
+                // If there's a file with the same name, delete it and create a folder
+                Log.w(TAG, "[RECOVERY] Step 2: Conflict - 'Fetch' exists but is not a directory. Deleting and recreating.")
+                if (fetchFolder.delete() && fetchFolder.mkdirs()) {
+                    Log.d(TAG, "[RECOVERY] Step 2: Successfully replaced file with directory")
+                } else {
+                    throw Exception("A file named 'Fetch' exists and could not be replaced by a folder.")
+                }
+            } else {
+                Log.d(TAG, "[RECOVERY] Step 2: Fetch folder exists and is valid")
+            }
+
+            // Final target path
+            var targetFile = File(fetchFolder, fileName)
+            if (targetFile.exists()) {
+                val timestamp = System.currentTimeMillis()
+                targetFile = File(fetchFolder, "${timestamp}_$fileName")
+                Log.d(TAG, "[RECOVERY] Step 3: Filename conflict, using: ${targetFile.name}")
+            } else {
+                Log.d(TAG, "[RECOVERY] Step 3: Target filename: ${targetFile.name}")
+            }
+
+            // Copy file - check readability first
+            Log.d(TAG, "[RECOVERY] Step 4: Checking source readability: ${sourceFile.canRead()}")
+            if (!sourceFile.canRead()) {
+                throw Exception("Cannot read source file (Permission denied). This usually happens for files in /Android/data or protected system folders. Current app permission: ${context.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)}")
+            }
+
+            Log.d(TAG, "[RECOVERY] Step 5: Starting copy to: ${targetFile.absolutePath}")
+            FileInputStream(sourceFile).use { input ->
+                FileOutputStream(targetFile).use { output ->
+                    val copied = input.copyTo(output)
+                    Log.d(TAG, "[RECOVERY] Step 6: Bytes copied: $copied")
+                }
+            }
+
+            // Trigger Media Scanner
+            Log.d(TAG, "[RECOVERY] Step 7: Triggering MediaScanner")
+            MediaScannerConnection.scanFile(
+                context,
+                arrayOf(targetFile.absolutePath),
+                null
+            ) { path, uri ->
+                Log.d(TAG, "[RECOVERY] MediaScanner scan complete - Path: $path, Uri: $uri")
+            }
+
+            Log.d(TAG, "[RECOVERY] SUCCESS: ${targetFile.absolutePath}")
+            targetFile.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "[RECOVERY] FAILED", e)
+            throw e // Rethrow to let the handler catch it and send to Flutter
         }
     }
     
