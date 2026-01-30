@@ -3,6 +3,8 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'dart:async';
 import '../../../core/database/database.dart';
 import '../../../core/utils/thumbnail_manager.dart';
+import '../../../core/utils/preview_manager.dart';
+import '../../../core/widgets/preview_overlay.dart';
 import 'dart:typed_data';
 
 /// Results screen showing recovered files in categorized tabs
@@ -26,6 +28,11 @@ class _ResultsScreenState extends State<ResultsScreen>
   
   // CRITICAL: Store subscription to prevent garbage collection
   StreamSubscription<List<ScannedFile>>? _fileStreamSubscription;
+  
+  // Preview overlay state
+  ScannedFile? _previewFile;
+  bool _isPreviewVisible = false;
+  Timer? _previewTimer;
 
   @override
   void initState() {
@@ -165,8 +172,28 @@ class _ResultsScreenState extends State<ResultsScreen>
     // CRITICAL: Cancel subscription to prevent memory leak
     print('[ResultsScreen] [DISPOSE] Cancelling file stream subscription');
     _fileStreamSubscription?.cancel();
+    _previewTimer?.cancel();
     _tabController.dispose();
+    _closePreview();
     super.dispose();
+  }
+
+  void _showPreview(ScannedFile file) {
+    print('[ResultsScreen] [PREVIEW] Long-press detected for ${file.fileName}');
+    setState(() {
+      _previewFile = file;
+      _isPreviewVisible = true;
+    });
+    PreviewManager().startPreview();
+  }
+
+  void _closePreview() {
+    print('[ResultsScreen] [PREVIEW] Closing preview');
+    _previewTimer?.cancel();
+    _previewTimer = null;
+    setState(() => _isPreviewVisible = false);
+    _previewFile = null;
+    PreviewManager().releasePreview();
   }
 
   @override
@@ -197,7 +224,17 @@ class _ResultsScreenState extends State<ResultsScreen>
             ],
           ),
         ),
-        body: _buildBody(context),
+        body: Stack(
+          children: [
+            _buildBody(context),
+            // Preview overlay (shown when long-press active)
+            if (_isPreviewVisible && _previewFile != null)
+              PreviewOverlay(
+                file: _previewFile!,
+                onDismiss: _closePreview,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -295,96 +332,109 @@ class _ResultsScreenState extends State<ResultsScreen>
     final isVideo = file.fileType == FileType.video;
     print('[ResultsScreen] [GRID_ITEM] Building tile for ${file.fileName} (isVideo=$isVideo)');
 
-    return InkWell(
-      onTap: () => _showFileDetails(file),
-      borderRadius: BorderRadius.circular(8),
-      child: ClipRRect(
+    return GestureDetector(
+      onLongPressStart: (_) {
+        print('[ResultsScreen] [PREVIEW] Long-press detected, starting 500ms timer (total 1000ms)');
+        _previewTimer?.cancel();
+        _previewTimer = Timer(const Duration(milliseconds: 500), () {
+          if (mounted) {
+            _showPreview(file);
+          }
+        });
+      },
+      onLongPressEnd: (_) => _closePreview(),
+      onLongPressCancel: () => _closePreview(),
+      child: InkWell(
+        onTap: () => _showFileDetails(file),
         borderRadius: BorderRadius.circular(8),
-        child: Container(
-          color: Colors.grey[300],
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              // Thumbnail (lazy, async, cached)
-              FutureBuilder<Uint8List?>(
-                future: ThumbnailManager().getThumbnail(file.path, isVideo: isVideo, width: 300),
-                builder: (ctx, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    print('[Thumbnail] requested for ${file.fileName}');
-                  }
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            color: Colors.grey[300],
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // Thumbnail (lazy, async, cached)
+                FutureBuilder<Uint8List?>(
+                  future: ThumbnailManager().getThumbnail(file.path, isVideo: isVideo, width: 300),
+                  builder: (ctx, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      print('[Thumbnail] requested for ${file.fileName}');
+                    }
 
-                  if (snapshot.hasData && snapshot.data != null && snapshot.data!.isNotEmpty) {
-                    print('[Thumbnail] loaded for ${file.fileName}');
-                    return Image.memory(
-                      snapshot.data!,
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: double.infinity,
-                    );
-                  }
+                    if (snapshot.hasData && snapshot.data != null && snapshot.data!.isNotEmpty) {
+                      print('[Thumbnail] loaded for ${file.fileName}');
+                      return Image.memory(
+                        snapshot.data!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: double.infinity,
+                      );
+                    }
 
-                  if (snapshot.hasError) {
-                    print('[Thumbnail] failed for ${file.fileName}: ${snapshot.error}');
-                  }
+                    if (snapshot.hasError) {
+                      print('[Thumbnail] failed for ${file.fileName}: ${snapshot.error}');
+                    }
 
-                  // Placeholder (shown immediately)
-                  return Container(
-                    color: Colors.grey[300],
-                    child: Center(
-                      child: Icon(
-                        _getCategoryIconFromFileType(file.fileType),
-                        color: Colors.white70,
-                        size: 40,
-                      ),
-                    ),
-                  );
-                },
-              ),
-
-              // Video overlay icon
-              if (isVideo)
-                const Positioned(
-                  top: 6,
-                  right: 6,
-                  child: Icon(
-                    Icons.videocam,
-                    color: Colors.white70,
-                    size: 20,
-                  ),
-                ),
-
-              // Bottom info bar (name + size)
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: Container(
-                  color: Colors.black.withOpacity(0.7),
-                  padding: const EdgeInsets.all(4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        file.fileName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                        ),
-                      ),
-                      Text(
-                        _formatFileSize(file.fileSize),
-                        style: const TextStyle(
+                    // Placeholder (shown immediately)
+                    return Container(
+                      color: Colors.grey[300],
+                      child: Center(
+                        child: Icon(
+                          _getCategoryIconFromFileType(file.fileType),
                           color: Colors.white70,
-                          fontSize: 8,
+                          size: 40,
                         ),
                       ),
-                    ],
+                    );
+                  },
+                ),
+
+                // Video overlay icon
+                if (isVideo)
+                  const Positioned(
+                    top: 6,
+                    right: 6,
+                    child: Icon(
+                      Icons.videocam,
+                      color: Colors.white70,
+                      size: 20,
+                    ),
+                  ),
+
+                // Bottom info bar (name + size)
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    color: Colors.black.withOpacity(0.7),
+                    padding: const EdgeInsets.all(4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          file.fileName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                          ),
+                        ),
+                        Text(
+                          _formatFileSize(file.fileSize),
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 8,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
