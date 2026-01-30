@@ -4,8 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
-import 'package:image/image.dart' as img;
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 /// ThumbnailManager
@@ -36,40 +36,38 @@ class ThumbnailManager {
   int _running = 0;
   final Queue<Function()> _queue = Queue();
 
+  static const _channel = MethodChannel('com.fetch.app/scanner');
+
   /// Get a thumbnail as bytes. Returns null on failure.
-  /// - [filePath]: absolute file path
-  /// - [isVideo]: true for video
-  /// - [width]: target thumbnail width (pixels)
   Future<Uint8List?> getThumbnail(String filePath, {required bool isVideo, int width = 300}) async {
     final key = await _cacheKey(filePath, width);
 
-    // 1. FAST PATH: Check in-memory LRU cache
+    // ... Fast path same ...
     final memCached = _memoryCache.get(key);
-    if (memCached != null) {
-      print('[CACHE] [MEM_HIT] $filePath');
-      return memCached;
+    if (memCached != null) return memCached;
+
+    final anyMemKey = _memoryCache._map.keys.firstWhere((k) => k.split('_w').first == key.split('_w').first, orElse: () => '');
+    if (anyMemKey.isNotEmpty) {
+      final fallback = _memoryCache.get(anyMemKey);
+      if (fallback != null) return fallback;
     }
 
     try {
-      // 2. DISK PATH: Check disk cache
       final cached = await _cache.getFileFromCache(key);
       if (cached != null && await cached.file.exists()) {
-        print('[CACHE] [DISK_HIT] $filePath');
         final bytes = await cached.file.readAsBytes();
         _memoryCache.put(key, bytes);
         return bytes;
       }
-    } catch (e) {
-      // ignore cache read errors
-    }
+    } catch (_) {}
 
     final completer = Completer<Uint8List?>();
 
     _queue.add(() async {
       try {
-        // 3. SLOW PATH: Generate thumbnail
-        print('[CACHE] [MISS/DECODE] $filePath (isVideo=$isVideo)');
+        print('[CACHE] [MISS/DECODE] $filePath (isVideo=$isVideo, width=$width)');
         Uint8List? bytes;
+        
         if (isVideo) {
           bytes = await VideoThumbnail.thumbnailData(
             video: filePath,
@@ -78,8 +76,21 @@ class ThumbnailManager {
             quality: 75,
           );
         } else {
-          final original = await File(filePath).readAsBytes();
-          bytes = await compute(_decodeAndResize, {'bytes': original, 'width': width});
+          // NEW: Use native decoding for large images
+          final String? thumbPath = await _channel.invokeMethod('generateThumbnail', {
+            'path': filePath,
+            'mimeType': 'image/*',
+            'size': width,
+          });
+          
+          if (thumbPath != null) {
+            final thumbFile = File(thumbPath);
+            if (await thumbFile.exists()) {
+              bytes = await thumbFile.readAsBytes();
+              // Cleanup temporary native thumbnail file
+              try { await thumbFile.delete(); } catch (_) {}
+            }
+          }
         }
 
         if (bytes != null && bytes.isNotEmpty) {
@@ -87,15 +98,13 @@ class ThumbnailManager {
           try {
             await _cache.putFile(key, bytes, fileExtension: 'jpg');
           } catch (e) {
-            print('[ThumbnailManager] Cache write failed for $filePath: $e');
+            print('[ThumbnailManager] Cache write failed: $e');
           }
         }
 
         completer.complete(bytes);
-        print('[CACHE] [READY] $filePath');
-      } catch (e, st) {
-        print('[ThumbnailManager] Thumbnail generation failed for $filePath: $e');
-        print(st);
+      } catch (e) {
+        print('[ThumbnailManager] Generation failed for $filePath: $e');
         completer.complete(null);
       } finally {
         _running--;
@@ -152,15 +161,4 @@ class _LruCache<K, V> {
   }
 
   void clear() => _map.clear();
-}
-
-Future<Uint8List> _decodeAndResize(Map args) async {
-  final bytes = args['bytes'] as Uint8List;
-  final width = args['width'] as int;
-
-  final decoded = img.decodeImage(bytes);
-  if (decoded == null) return Uint8List(0);
-  final resized = img.copyResize(decoded, width: width);
-  final encoded = img.encodeJpg(resized, quality: 85);
-  return Uint8List.fromList(encoded);
 }

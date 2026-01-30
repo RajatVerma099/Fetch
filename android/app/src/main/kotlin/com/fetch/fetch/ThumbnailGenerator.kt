@@ -14,18 +14,17 @@ import java.util.UUID
  * Generate thumbnails for media files
  */
 object ThumbnailGenerator {
-    
-    private const val THUMBNAIL_SIZE = 256
     private const val THUMBNAIL_QUALITY = 80
     
-    fun generate(context: Context, path: String, mimeType: String): String? {
+    
+    fun generate(context: Context, path: String, mimeType: String, size: Int = 256): String? {
         val file = File(path)
         if (!file.exists()) return null
         
         return try {
             val bitmap = when {
-                mimeType.startsWith("image/") -> generateImageThumbnail(path)
-                mimeType.startsWith("video/") -> generateVideoThumbnail(path)
+                mimeType.startsWith("image/") -> generateImageThumbnail(path, size)
+                mimeType.startsWith("video/") -> generateVideoThumbnail(path, size)
                 else -> null
             }
             
@@ -35,35 +34,32 @@ object ThumbnailGenerator {
         }
     }
     
-    private fun generateImageThumbnail(path: String): Bitmap? {
+    private fun generateImageThumbnail(path: String, targetSize: Int): Bitmap? {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 ThumbnailUtils.createImageThumbnail(
                     File(path),
-                    Size(THUMBNAIL_SIZE, THUMBNAIL_SIZE),
+                    Size(targetSize, targetSize),
                     null
                 )
             } else {
-                // For older Android versions
+                // For older Android versions - Use sample size for large images
                 val options = android.graphics.BitmapFactory.Options().apply {
                     inJustDecodeBounds = true
                 }
                 android.graphics.BitmapFactory.decodeFile(path, options)
                 
-                // Calculate sample size
-                val sampleSize = calculateSampleSize(
+                options.inSampleSize = calculateSampleSize(
                     options.outWidth, 
                     options.outHeight, 
-                    THUMBNAIL_SIZE, 
-                    THUMBNAIL_SIZE
+                    targetSize, 
+                    targetSize
                 )
                 
                 options.inJustDecodeBounds = false
-                options.inSampleSize = sampleSize
-                
                 val bitmap = android.graphics.BitmapFactory.decodeFile(path, options)
                 bitmap?.let {
-                    Bitmap.createScaledBitmap(it, THUMBNAIL_SIZE, THUMBNAIL_SIZE, true)
+                    Bitmap.createScaledBitmap(it, targetSize, targetSize, true)
                 }
             }
         } catch (e: Exception) {
@@ -71,12 +67,12 @@ object ThumbnailGenerator {
         }
     }
     
-    private fun generateVideoThumbnail(path: String): Bitmap? {
+    private fun generateVideoThumbnail(path: String, targetSize: Int): Bitmap? {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 ThumbnailUtils.createVideoThumbnail(
                     File(path),
-                    Size(THUMBNAIL_SIZE, THUMBNAIL_SIZE),
+                    Size(targetSize, targetSize),
                     null
                 )
             } else {
@@ -88,7 +84,7 @@ object ThumbnailGenerator {
                         MediaMetadataRetriever.OPTION_CLOSEST_SYNC
                     )
                     frame?.let {
-                        Bitmap.createScaledBitmap(it, THUMBNAIL_SIZE, THUMBNAIL_SIZE, true)
+                        Bitmap.createScaledBitmap(it, targetSize, targetSize, true)
                     }
                 } finally {
                     retriever.release()
@@ -99,19 +95,13 @@ object ThumbnailGenerator {
         }
     }
     
-    private fun calculateSampleSize(
-        actualWidth: Int, 
-        actualHeight: Int, 
-        reqWidth: Int, 
-        reqHeight: Int
-    ): Int {
+    // ... Rest of the helper methods remain the same ...
+    private fun calculateSampleSize(actualWidth: Int, actualHeight: Int, reqWidth: Int, reqHeight: Int): Int {
         var sampleSize = 1
         if (actualHeight > reqHeight || actualWidth > reqWidth) {
             val halfHeight = actualHeight / 2
             val halfWidth = actualWidth / 2
-            
-            while ((halfHeight / sampleSize) >= reqHeight && 
-                   (halfWidth / sampleSize) >= reqWidth) {
+            while ((halfHeight / sampleSize) >= reqHeight && (halfWidth / sampleSize) >= reqWidth) {
                 sampleSize *= 2
             }
         }
@@ -120,15 +110,12 @@ object ThumbnailGenerator {
     
     private fun saveThumbnail(context: Context, bitmap: Bitmap): String {
         val thumbnailDir = File(context.cacheDir, "thumbnails")
-        if (!thumbnailDir.exists()) {
-            thumbnailDir.mkdirs()
-        }
+        if (!thumbnailDir.exists()) thumbnailDir.mkdirs()
         
         val thumbnailFile = File(thumbnailDir, "${UUID.randomUUID()}.jpg")
         FileOutputStream(thumbnailFile).use { out ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, THUMBNAIL_QUALITY, out)
         }
-        
         return thumbnailFile.absolutePath
     }
 }

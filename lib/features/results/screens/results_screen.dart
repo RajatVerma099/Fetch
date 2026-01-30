@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'dart:async';
 import '../../../core/database/database.dart';
@@ -17,6 +18,7 @@ class ResultsScreen extends StatefulWidget {
 
 class _ResultsScreenState extends State<ResultsScreen>
     with SingleTickerProviderStateMixin {
+  static const _scannerChannel = MethodChannel('com.fetch.app/scanner');
   late TabController _tabController;
   final _images = <ScannedFile>[];
   final _videos = <ScannedFile>[];
@@ -553,13 +555,73 @@ class _ResultsScreenState extends State<ResultsScreen>
     );
   }
 
-  void _recoverFile(ScannedFile file) {
+  Future<void> _recoverFile(ScannedFile file) async {
+    print('[RECOVERY] [START] Requesting recovery for ${file.fileName}');
+    
+    // Show "Recovering..." snackbar or dialog if needed
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('File ${file.fileName} recovered successfully!'),
-        backgroundColor: Colors.green,
+        content: Text('Recovering ${file.fileName}...'),
+        duration: const Duration(seconds: 1),
       ),
     );
+
+    try {
+      final result = await _scannerChannel.invokeMethod('recoverFile', {
+        'path': file.path,
+        'name': file.fileName,
+        'category': _getCategoryNameFromType(file.fileType),
+      });
+
+      if (result != null) {
+        print('[RECOVERY] [SUCCESS] File recovered to $result');
+        if (mounted) {
+          ScaffoldMessenger.of(context).clearSnackBars();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Recovered to Fetch folder!'),
+              backgroundColor: Colors.green,
+              action: SnackBarAction(
+                label: 'DISMISS',
+                textColor: Colors.white,
+                onPressed: () {},
+              ),
+            ),
+          );
+        }
+      }
+    } on PlatformException catch (e) {
+      print('[RECOVERY] [ERROR] PlatformException: ${e.code}, ${e.message}');
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.message ?? e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('[RECOVERY] [ERROR] Unknown error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Unknown error: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  String _getCategoryNameFromType(FileType type) {
+    return type.toString().split('.').last.toLowerCase();
   }
 
   String _formatFileSize(int bytes) {

@@ -132,12 +132,16 @@ class _PreviewOverlayState extends State<PreviewOverlay> {
         }
 
         if (snapshot.hasData && snapshot.data != null && snapshot.data!.isNotEmpty) {
-          print('[PreviewOverlay] Image preview loaded');
+          print('[PreviewOverlay] [DISPLAYED] Image preview loaded (${snapshot.data!.length} bytes)');
           return Image.memory(
             snapshot.data!,
             fit: BoxFit.contain,
             width: double.infinity,
             height: double.infinity,
+            errorBuilder: (context, error, stackTrace) {
+              print('[PreviewOverlay] [ERROR] Image.memory failed: $error');
+              return const Center(child: Icon(Icons.broken_image, size: 64, color: Colors.grey));
+            },
           );
         }
 
