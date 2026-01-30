@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'dart:async';
 import '../../../core/database/database.dart';
+import '../../../core/utils/thumbnail_manager.dart';
+import 'dart:typed_data';
 
 /// Results screen showing recovered files in categorized tabs
 class ResultsScreen extends StatefulWidget {
@@ -290,6 +292,9 @@ class _ResultsScreenState extends State<ResultsScreen>
   }
 
   Widget _buildFileGridItem(ScannedFile file) {
+    final isVideo = file.fileType == FileType.video;
+    print('[ResultsScreen] [GRID_ITEM] Building tile for ${file.fileName} (isVideo=$isVideo)');
+
     return InkWell(
       onTap: () => _showFileDetails(file),
       borderRadius: BorderRadius.circular(8),
@@ -300,13 +305,55 @@ class _ResultsScreenState extends State<ResultsScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Center(
-                child: Icon(
-                  _getCategoryIconFromFileType(file.fileType),
-                  color: Colors.white70,
-                  size: 40,
-                ),
+              // Thumbnail (lazy, async, cached)
+              FutureBuilder<Uint8List?>(
+                future: ThumbnailManager().getThumbnail(file.path, isVideo: isVideo, width: 300),
+                builder: (ctx, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    print('[Thumbnail] requested for ${file.fileName}');
+                  }
+
+                  if (snapshot.hasData && snapshot.data != null && snapshot.data!.isNotEmpty) {
+                    print('[Thumbnail] loaded for ${file.fileName}');
+                    return Image.memory(
+                      snapshot.data!,
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      height: double.infinity,
+                    );
+                  }
+
+                  if (snapshot.hasError) {
+                    print('[Thumbnail] failed for ${file.fileName}: ${snapshot.error}');
+                  }
+
+                  // Placeholder (shown immediately)
+                  return Container(
+                    color: Colors.grey[300],
+                    child: Center(
+                      child: Icon(
+                        _getCategoryIconFromFileType(file.fileType),
+                        color: Colors.white70,
+                        size: 40,
+                      ),
+                    ),
+                  );
+                },
               ),
+
+              // Video overlay icon
+              if (isVideo)
+                const Positioned(
+                  top: 6,
+                  right: 6,
+                  child: Icon(
+                    Icons.videocam,
+                    color: Colors.white70,
+                    size: 20,
+                  ),
+                ),
+
+              // Bottom info bar (name + size)
               Positioned(
                 bottom: 0,
                 left: 0,
